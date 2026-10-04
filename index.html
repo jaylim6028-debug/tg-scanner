@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Scan QR code</title>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: #14100c; color: #fff; }
+  body { font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans KR", sans-serif;
+    display: flex; flex-direction: column; gap: 14px; padding: 16px; min-height: 100vh; max-width: 560px; margin: 0 auto; }
+  .top { display: flex; justify-content: space-between; align-items: center; }
+  button { font: inherit; font-weight: 700; border: 0; border-radius: 12px; padding: 16px; width: 100%; cursor: pointer;
+    background: #fbe9dc; color: #b5501c; }
+  .go { background: #b5501c; color: #fff; font-size: 18px; }
+  .back { width: auto; background: transparent; color: #fff; padding: 8px; }
+  .view { position: relative; width: 100%; aspect-ratio: 1 / 1; border-radius: 16px; overflow: hidden; background: #000; }
+  video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .frame { position: absolute; inset: 15%; border: 3px solid rgba(255,255,255,.9); border-radius: 18px; box-shadow: 0 0 0 999px rgba(0,0,0,.35); }
+  p { text-align: center; margin: 0; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div class="top"><b>Scan guest QR code</b><button class="back" id="backBtn" onclick="goBack()">← Back</button></div>
+<div class="view"><video id="v" playsinline webkit-playsinline muted autoplay></video><div class="frame"></div></div>
+<p id="msg">Starting camera…</p>
+<button id="goBtn" class="go hidden" onclick="startCamera()">▶ Tap to start camera</button>
+<button id="photoBtn" onclick="document.getElementById('f').click()">📷 Take a photo instead</button>
+<input id="f" type="file" accept="image/*" capture="environment" class="hidden">
+<canvas id="c" class="hidden"></canvas>
+<script>
+  // Only ever sends staff to our own Google Apps Script wallet pages.
+  const WALLET = /^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec\?(.*&)?w=[A-Za-z0-9]+/;
+  const APP = /^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec/;
+  const back = new URLSearchParams(location.search).get('back') || '';
+  const $ = id => document.getElementById(id);
+  let stream = null, raf = 0, sent = false, watchdog = 0;
+
+  function msg(t) { $('msg').textContent = t; }
+  function show(id, on) { $(id).classList.toggle('hidden', !on); }
+  function stop() { cancelAnimationFrame(raf); clearTimeout(watchdog); if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; } }
+  function goBack() { stop(); if (APP.test(back)) location.href = back; else history.back(); }
+
+  function found(text) {
+    if (sent) return;
+    text = String(text || '').trim();
+    if (WALLET.test(text)) {
+      sent = true; stop();
+      if (navigator.vibrate) navigator.vibrate(80);
+      msg('Got it! Opening the wallet…');
+      location.href = text;
+    } else if (/^[A-Za-z]+-\d+$/.test(text)) {
+      msg('This is an old ticket QR (' + text + '). Go back and search for ' + text + ' instead.');
+    } else {
+      msg('That isn\'t one of our QR codes.');
+    }
+  }
+
+  function read(src, w, h, invert) {
+    const c = $('c'); c.width = w; c.height = h;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(src, 0, 0, w, h);
+    const r = window.jsQR && jsQR(ctx.getImageData(0, 0, w, h).data, w, h, { inversionAttempts: invert ? 'attemptBoth' : 'dontInvert' });
+    return r && r.data ? r.data : null;
+  }
+
+  let lastBad = '';
+  function loop() {
+    if (!stream || sent) return;
+    const v = $('v');
+    if (v.readyState >= 2 && v.videoWidth) {
+      clearTimeout(watchdog);
+      const w = 480, h = Math.round(v.videoHeight * w / v.videoWidth);
+      const t = read(v, w, h, false);
+      if (t && t !== lastBad) { found(t); if (!sent) lastBad = t; }
+    }
+    raf = requestAnimationFrame(loop);
+  }
+
+  function startCamera() {
+    if (!window.jsQR) { msg('The scanner didn\'t load. Check the internet connection, or take a photo instead.'); return; }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      show('goBtn', false); msg('This browser can\'t use the live camera. Take a photo instead.'); return;
+    }
+    stop(); sent = false; lastBad = '';
+    show('goBtn', false);
+    msg('Starting camera… If your phone asks, tap Allow.');
+    watchdog = setTimeout(() => { show('goBtn', true); msg('The camera didn\'t start. Tap the button to try again, or take a photo instead.'); }, 6000);
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false })
+      .then(s => {
+        stream = s;
+        const v = $('v'); v.muted = true; v.srcObject = s;
+        const p = v.play(); if (p && p.catch) p.catch(() => {});
+        msg('Point the camera at the guest\'s QR code.');
+        loop();
+      })
+      .catch(e => {
+        clearTimeout(watchdog);
+        show('goBtn', true);
+        msg((e && e.name === 'NotAllowedError')
+          ? 'Camera permission was blocked. Allow the camera for this website in your browser settings, then tap the button.'
+          : 'The camera couldn\'t start (' + ((e && e.name) || 'error') + '). Tap the button to try again, or take a photo instead.');
+      });
+  }
+
+  $('f').addEventListener('change', () => {
+    const file = $('f').files[0]; $('f').value = '';
+    if (!file) return;
+    msg('Reading the photo…');
+    const url = URL.createObjectURL(file), img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const s = Math.min(1, 1200 / Math.max(img.width, img.height));
+      const t = read(img, Math.round(img.width * s), Math.round(img.height * s), true);
+      if (t) found(t); else msg('No QR code found in that photo. Try again, steady and a little closer.');
+    };
+    img.src = url;
+  });
+
+  if (!APP.test(back)) show('backBtn', false);
+  window.addEventListener('load', startCamera);
+  // Coming back with the browser's Back button: restart the camera.
+  window.addEventListener('pageshow', e => { if (e.persisted) startCamera(); });
+</script>
+</body>
+</html>
